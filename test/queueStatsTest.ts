@@ -65,6 +65,83 @@ describe('queueStats', function () {
     expect(totalCount).toBe(0)
   })
 
+  it('should return priorityCounts when includePriorityCounts is set', async function () {
+    ctx.boss = await init(ctx.bossConfig)
+
+    await ctx.boss.send(queue1, null, { priority: 10 })
+    await ctx.boss.send(queue1, null, { priority: 5 })
+    await ctx.boss.send(queue1, null, { priority: 5 })
+
+    const queueData = await ctx.boss.getQueueStats(queue1, { includePriorityCounts: true })
+
+    expect(queueData.priorityCounts).toBeDefined()
+    expect(queueData.priorityCounts!.length).toBe(3)
+
+    const [first, second, third] = queueData.priorityCounts!
+    expect(first.priority).toBe(10)
+    expect(first.queuedCount).toBe(1)
+    expect(second.priority).toBe(5)
+    expect(second.queuedCount).toBe(2)
+    expect(third.priority).toBe(0)
+    expect(third.queuedCount).toBe(2)
+  })
+
+  it('should return empty priorityCounts array for empty queue when includePriorityCounts is set', async function () {
+    ctx.boss = await helper.start(ctx.bossConfig)
+    const queue = randomUUID()
+    await ctx.boss.createQueue(queue)
+
+    const queueData = await ctx.boss.getQueueStats(queue, { includePriorityCounts: true })
+
+    expect(queueData.priorityCounts).toBeDefined()
+    expect(queueData.priorityCounts!.length).toBe(0)
+  })
+
+  it('should not include priorityCounts by default', async function () {
+    ctx.boss = await init(ctx.bossConfig)
+
+    const queueData = await ctx.boss.getQueueStats(queue1)
+
+    expect(queueData.priorityCounts).toBeUndefined()
+  })
+
+  it('should cache priorityCounts when trackPriorityStats is enabled', async function () {
+    ctx.boss = await helper.start({ ...ctx.bossConfig, monitorIntervalSeconds: 1, queueCacheIntervalSeconds: 1 })
+    const queue = randomUUID()
+    await ctx.boss.createQueue(queue, { trackPriorityStats: true })
+
+    await ctx.boss.send(queue, null, { priority: 10 })
+    await ctx.boss.send(queue, null, { priority: 0 })
+    await ctx.boss.send(queue, null, { priority: 0 })
+
+    await ctx.boss.supervise(queue)
+
+    const queueData = await ctx.boss.getQueue(queue)
+
+    expect(queueData!.priorityCounts).toBeDefined()
+    expect(queueData!.priorityCounts!.length).toBe(2)
+
+    const [first, second] = queueData!.priorityCounts!
+    expect(first.priority).toBe(10)
+    expect(first.queuedCount).toBe(1)
+    expect(second.priority).toBe(0)
+    expect(second.queuedCount).toBe(2)
+  })
+
+  it('should not cache priorityCounts when trackPriorityStats is disabled', async function () {
+    ctx.boss = await helper.start({ ...ctx.bossConfig, monitorIntervalSeconds: 1, queueCacheIntervalSeconds: 1 })
+    const queue = randomUUID()
+    await ctx.boss.createQueue(queue)
+
+    await ctx.boss.send(queue, null, { priority: 10 })
+
+    await ctx.boss.supervise(queue)
+
+    const queueData = await ctx.boss.getQueue(queue)
+
+    expect(queueData!.priorityCounts).toBeNull()
+  })
+
   it('should properly get queue stats when all jobs are deleted', async function () {
     ctx.boss = await helper.start({ ...ctx.bossConfig, monitorIntervalSeconds: 1, queueCacheIntervalSeconds: 1 })
 

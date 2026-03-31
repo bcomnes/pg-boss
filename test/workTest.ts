@@ -306,6 +306,23 @@ describe('work', function () {
     expect((job2.output as any).message).toContain('handler execution exceeded')
   })
 
+  it('should include countByPriority in wip event', async function () {
+    ctx.boss = await helper.start(ctx.bossConfig)
+
+    const wipEvent = new Promise<Array<any>>(resolve => ctx.boss!.once('wip', resolve))
+
+    await ctx.boss.send(ctx.schema, null, { priority: 10 })
+    await ctx.boss.send(ctx.schema, null, { priority: 0 })
+
+    await ctx.boss.work(ctx.schema, { pollingIntervalSeconds: 1, batchSize: 2 }, () => delay(2000))
+
+    const [worker] = await wipEvent
+
+    expect(worker.count).toBe(2)
+    expect(worker.countByPriority[10]).toBe(1)
+    expect(worker.countByPriority[0]).toBe(1)
+  })
+
   it('should emit wip event every 2s for workers', async function () {
     ctx.boss = await helper.start(ctx.bossConfig)
 

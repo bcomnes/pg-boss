@@ -948,12 +948,12 @@ class Manager extends EventEmitter implements types.EventsMixin {
     }
   }
 
-  async getQueueStats (name: string) {
+  async getQueueStats (name: string, options: { includePriorityCounts?: boolean } = {}) {
     Attorney.assertQueueName(name)
 
     const queue = await this.getQueueCache(name)
 
-    const query = plans.getQueueStats(this.config.schema, queue.table, [name])
+    const query = plans.getQueueStats(this.config.schema, queue.table, [name], options.includePriorityCounts)
 
     const { rows } = await this.db.executeSql(query.text, query.values)
 

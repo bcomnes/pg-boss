@@ -126,6 +126,8 @@ function createTableQueue (schema: string) {
       active_count int NOT NULL default 0,
       total_count int NOT NULL default 0,
       heartbeat_seconds int,
+      track_priority_stats bool NOT NULL default false,
+      priority_counts jsonb,
       singletons_active text[],
       monitor_on timestamp with time zone,
       maintain_on timestamp with time zone,
@@ -324,7 +326,7 @@ function createTableJob (schema: string) {
   `
 }
 
-const JOB_COLUMNS_MIN = 'id, name, data, expire_seconds as "expireInSeconds", heartbeat_seconds as "heartbeatSeconds", group_id as "groupId", group_tier as "groupTier"'
+const JOB_COLUMNS_MIN = 'id, name, data, priority, expire_seconds as "expireInSeconds", heartbeat_seconds as "heartbeatSeconds", group_id as "groupId", group_tier as "groupTier"'
 const JOB_COLUMNS_ALL = `${JOB_COLUMNS_MIN},
   policy,
   state,
@@ -396,7 +398,8 @@ function createQueueFunction (schema: string) {
           dead_letter,
           partition,
           table_name,
-          heartbeat_seconds
+          heartbeat_seconds,
+          track_priority_stats
         )
         VALUES (
           queue_name,
@@ -412,7 +415,8 @@ function createQueueFunction (schema: string) {
           options->>'deadLetter',
           COALESCE((options->>'partition')::bool, ${QUEUE_DEFAULTS.partition}),
           tablename,
-          (options->>'heartbeatSeconds')::int
+          (options->>'heartbeatSeconds')::int,
+          COALESCE((options->>'trackPriorityStats')::bool, false)
         )
         ON CONFLICT DO NOTHING
         RETURNING created_on
@@ -594,6 +598,7 @@ function updateQueue (schema: string, { deadLetter }: UpdateQueueOptions = {}) {
       heartbeat_seconds = CASE WHEN o.data ? 'heartbeatSeconds'
         THEN (o.data->>'heartbeatSeconds')::int
         ELSE heartbeat_seconds END,
+      track_priority_stats = COALESCE((o.data->>'trackPriorityStats')::bool, track_priority_stats),
       ${
         deadLetter === undefined
           ? ''
@@ -628,6 +633,8 @@ function getQueues (schema: string, names?: string[]): SqlQuery {
       q.active_count as "activeCount",
       q.total_count as "totalCount",
       q.singletons_active as "singletonsActive",
+      q.track_priority_stats as "trackPriorityStats",
+      q.priority_counts as "priorityCounts",
       q.table_name as "table",
       q.created_on as "createdOn",
       q.updated_on as "updatedOn"
@@ -1358,10 +1365,47 @@ function retryJobs (schema: string, table: string) {
   `
 }
 
-function getQueueStats (schema: string, table: string, queues: string[]): SqlQuery {
+function getQueueStats (schema: string, table: string, queues: string[], includePriorityCounts = false): SqlQuery {
+  const priorityCountsCte = includePriorityCounts ? `
+    ,
+    priority_counts AS (
+      SELECT
+        name,
+        priority,
+        (count(*) FILTER (WHERE state < '${JOB_STATES.active}'))::int as queued_cnt,
+        (count(*) FILTER (WHERE state = '${JOB_STATES.active}'))::int as active_cnt,
+        (count(*) FILTER (WHERE start_after > now()))::int as deferred_cnt
+      FROM ${schema}.${table}
+      WHERE name = ANY($1::text[])
+      GROUP BY name, priority
+    ),
+    priority_agg AS (
+      SELECT
+        name,
+        COALESCE(jsonb_agg(
+          jsonb_build_object(
+            'priority', priority,
+            'queuedCount', queued_cnt,
+            'activeCount', active_cnt,
+            'deferredCount', deferred_cnt
+          ) ORDER BY priority DESC
+        ), '[]'::jsonb) as "priorityCounts"
+      FROM priority_counts
+      GROUP BY name
+    )` : ''
+
+  const priorityCountsJoin = includePriorityCounts
+    ? 'LEFT JOIN priority_agg p ON p.name = stats.name'
+    : ''
+
+  const priorityCountsSelect = includePriorityCounts
+    ? ', COALESCE(p."priorityCounts", \'[]\'::jsonb) as "priorityCounts"'
+    : ''
+
   return {
     text: `
-    SELECT
+    WITH stats AS (
+      SELECT
         name,
         (count(*) FILTER (WHERE start_after > now()))::int as "deferredCount",
         (count(*) FILTER (WHERE state < '${JOB_STATES.active}'))::int as "queuedCount",
@@ -1371,6 +1415,10 @@ function getQueueStats (schema: string, table: string, queues: string[]): SqlQue
       FROM ${schema}.${table}
       WHERE name = ANY($1::text[])
       GROUP BY 1
+    )${priorityCountsCte}
+    SELECT stats.*${priorityCountsSelect}
+    FROM stats
+    ${priorityCountsJoin}
   `,
     values: [queues]
   }
@@ -1382,18 +1430,36 @@ function cacheQueueStats (schema: string, table: string, queues: string[]): stri
   const statsText = statsQuery.text.replace('$1::text[]', serializeArrayParam(queues))
 
   const sql = `
-    WITH stats AS (${statsText})
+    WITH stats AS (${statsText}),
+    priority_stats AS (
+      SELECT
+        j.name,
+        jsonb_agg(
+          jsonb_build_object(
+            'priority', j.priority,
+            'queuedCount', count(*) FILTER (WHERE j.state < '${JOB_STATES.active}'),
+            'activeCount', count(*) FILTER (WHERE j.state = '${JOB_STATES.active}'),
+            'deferredCount', count(*) FILTER (WHERE j.start_after > now())
+          ) ORDER BY j.priority DESC
+        ) as priority_counts
+      FROM ${schema}.${table} j
+      JOIN ${schema}.queue q ON q.name = j.name AND q.track_priority_stats = true
+      WHERE j.name = ANY(${serializeArrayParam(queues)})
+      GROUP BY j.name
+    )
     UPDATE ${schema}.queue SET
       deferred_count = COALESCE(stats."deferredCount", 0),
       queued_count = COALESCE(stats."queuedCount", 0),
       active_count = COALESCE(stats."activeCount", 0),
       total_count = COALESCE(stats."totalCount", 0),
-      singletons_active = stats."singletonsActive"
+      singletons_active = stats."singletonsActive",
+      priority_counts = CASE WHEN track_priority_stats THEN COALESCE(priority_stats.priority_counts, '[]'::jsonb) ELSE NULL END
     FROM (
       SELECT q.name
       FROM unnest(${serializeArrayParam(queues)}) AS q(name)
     ) q
     LEFT JOIN stats ON stats.name = q.name
+    LEFT JOIN priority_stats ON priority_stats.name = q.name
     WHERE queue.name = q.name
     RETURNING
       queue.name,

@@ -67,16 +67,19 @@ Emitted at most once every 2 seconds when workers are receiving jobs. The payloa
     options: { pollingInterval: 2000 },
     state: 'active',
     count: 1,
+    countByPriority: { 10: 1 },
     createdOn: 1620149137015,
     lastFetchedOn: 1620149137015,
     lastJobStartedOn: 1620149137015,
     lastJobEndedOn: null,
-    lastJobDuration: 343
+    lastJobDuration: 343,
     lastError: null,
     lastErrorOn: null
   }
 ]
 ```
+
+`countByPriority` is a map of priority value to the number of jobs at that priority currently active in this worker. Only priorities with active jobs are included.
 
 ## `stopped`
 

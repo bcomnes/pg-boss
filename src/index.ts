@@ -307,8 +307,8 @@ export class PgBoss extends EventEmitter<types.PgBossEventMap> {
     return this.#manager.getQueue(name)
   }
 
-  getQueueStats (name: string): Promise<types.QueueResult> {
-    return this.#manager.getQueueStats(name)
+  getQueueStats (name: string, options?: { includePriorityCounts?: boolean }): Promise<types.QueueResult> {
+    return this.#manager.getQueueStats(name, options)
   }
 
   isMaintaining (): boolean {
@@ -412,6 +412,8 @@ export type {
   Schedule,
   ScheduleOptions,
   SchedulingOptions,
+  PriorityCount,
+  PriorityCountMap,
   SendOptions,
   StopOptions,
   WipData,

@@ -264,7 +264,22 @@ export interface Queue extends QueueOptions {
    * When set, workers must send periodic heartbeats. NULL = heartbeat disabled (default).
    */
   heartbeatSeconds?: number;
+  /**
+   * When enabled, queue stats will be broken down by priority level and available
+   * via `priorityCounts` on the queue result.
+   * @default false
+   */
+  trackPriorityStats?: boolean;
 }
+
+export interface PriorityCount {
+  priority: number;
+  queuedCount: number;
+  activeCount: number;
+  deferredCount: number;
+}
+
+export type PriorityCountMap = Record<number, number>
 
 export interface QueueResult extends Queue {
   deferredCount: number;
@@ -275,6 +290,7 @@ export interface QueueResult extends Queue {
   createdOn: Date;
   updatedOn: Date;
   singletonsActive: string[] | null;
+  priorityCounts: PriorityCount[] | null;
 }
 
 export type ScheduleOptions = SendOptions & { tz?: string, key?: string }
@@ -394,6 +410,7 @@ export interface Job<T = object> {
   id: string;
   name: string;
   data: T;
+  priority: number;
   expireInSeconds: number;
   heartbeatSeconds: number | null;
   signal: AbortSignal;
@@ -402,7 +419,6 @@ export interface Job<T = object> {
 }
 
 export interface JobWithMetadata<T = object> extends Job<T> {
-  priority: number;
   state: 'created' | 'retry' | 'active' | 'completed' | 'cancelled' | 'failed';
   retryLimit: number;
   retryCount: number;
@@ -452,6 +468,7 @@ export interface WipData {
   options: WorkOptions;
   state: WorkerState;
   count: number;
+  countByPriority: PriorityCountMap;
   createdOn: number;
   lastFetchedOn: number | null;
   lastJobStartedOn: number | null;

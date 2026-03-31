@@ -70,6 +70,10 @@ Allowed policy values:
 
   Default: none (disabled). Expected heartbeat interval in seconds. When set, workers using `work()` will automatically send periodic heartbeats. If no heartbeat is received within this interval, the monitor will fail/retry the job. Must be >= 10. Can be overridden per-job via `send()` options.
 
+* **trackPriorityStats**, bool
+
+  Default: false. When enabled, the monitor will compute and cache a per-priority breakdown of job counts for this queue. The cached data is available as `priorityCounts` on the result of `getQueues()` and `getQueue()`. Useful for dashboards that need to understand queue depth across priority levels without the overhead of a live aggregation query on every read. For a one-off live query, see `getQueueStats()` with `includePriorityCounts`.
+
 #### Heartbeat vs expiration
 
 Heartbeat and expiration are two independent mechanisms that address different failure modes:
@@ -139,9 +143,21 @@ Returns all queues
 
 Returns a queue by name
 
-### `getQueueStats(name)`
+### `getQueueStats(name, options)`
 
-Returns the number of jobs in various states in a queue.  The result matches the results from getQueue(), but ignores the cached data and forces the stats to be retrieved immediately.
+Returns the number of jobs in various states in a queue. The result matches the results from `getQueue()`, but ignores the cached data and forces the stats to be retrieved immediately.
+
+* **includePriorityCounts**, bool, default `false`
+
+  When `true`, the result will include a `priorityCounts` array with per-priority breakdowns of `queuedCount`, `activeCount`, and `deferredCount`, sorted by priority descending. This requires an additional aggregation query against the job table, so it is opt-in.
+
+  ```js
+  const stats = await boss.getQueueStats('my-queue', { includePriorityCounts: true })
+  // stats.priorityCounts => [
+  //   { priority: 10, queuedCount: 3, activeCount: 1, deferredCount: 0 },
+  //   { priority: 0,  queuedCount: 8, activeCount: 2, deferredCount: 1 },
+  // ]
+  ```
 
 ### `getBlockedKeys(name)`
 

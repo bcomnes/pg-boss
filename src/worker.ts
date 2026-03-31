@@ -137,6 +137,10 @@ class Worker<T = unknown> {
       options: this.options,
       state: this.state,
       count: this.jobs.length,
+      countByPriority: this.jobs.reduce((acc, job) => {
+        acc[job.priority] = (acc[job.priority] ?? 0) + 1
+        return acc
+      }, {} as types.PriorityCountMap),
       createdOn: this.createdOn,
       lastFetchedOn: this.lastFetchedOn,
       lastJobStartedOn: this.lastJobStartedOn,
