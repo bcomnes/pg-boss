@@ -278,6 +278,8 @@ function validateRetryConfig (config: any) {
   assert(!('retryBackoff' in config) || (config.retryBackoff === true || config.retryBackoff === false), 'retryBackoff must be either true or false')
   assert(!('retryDelayMax' in config) || config.retryDelayMax === null || config.retryBackoff === true, 'retryDelayMax can only be set if retryBackoff is true')
   assert(!('retryDelayMax' in config) || config.retryDelayMax === null || (Number.isInteger(config.retryDelayMax) && config.retryDelayMax >= 0), 'retryDelayMax must be an integer >= 0')
+  assert(!('retryJitter' in config) || (typeof config.retryJitter === 'number' && config.retryJitter >= 0), 'retryJitter must be a number >= 0')
+  assert(!('retryJitter' in config) || config.retryBackoff === true, 'retryJitter can only be set if retryBackoff is true')
 }
 
 function validateHeartbeatConfig (config: any) {

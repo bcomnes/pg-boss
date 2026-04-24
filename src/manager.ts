@@ -561,6 +561,7 @@ class Manager extends EventEmitter implements types.EventsMixin {
       retryDelay,
       retryBackoff,
       retryDelayMax,
+      retryJitter,
       heartbeatSeconds,
       group,
       deadLetter = null
@@ -585,6 +586,7 @@ class Manager extends EventEmitter implements types.EventsMixin {
       retryDelay,
       retryBackoff,
       retryDelayMax,
+      retryJitter,
       heartbeatSeconds,
       deadLetter
     }

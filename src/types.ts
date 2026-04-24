@@ -151,6 +151,20 @@ export interface QueueOptions {
    */
   retryDelayMax?: number;
   /**
+   * Multiplier for the random component of exponential backoff. Only used when
+   * `retryBackoff` is `true`.
+   *
+   * Delay range per retry: `[base, base * (1 + retryJitter)]`
+   * where `base = retryDelay * 2^retryCount`.
+   *
+   * The default value of `1` preserves the existing "equal jitter" behaviour
+   * (random spread equals the base delay). Set higher to widen the jitter
+   * window — useful for avoiding thundering herd when many jobs fail at once.
+   *
+   * @default 1
+   */
+  retryJitter?: number;
+  /**
    * Expected heartbeat interval in seconds. When set, workers must send periodic
    * heartbeats. If no heartbeat is received within this interval, the monitor will
    * fail/retry the job. Must be >= 10. NULL = heartbeat disabled (default).
@@ -401,6 +415,7 @@ export interface JobWithMetadata<T = object> extends Job<T> {
   retryDelay: number;
   retryBackoff: boolean;
   retryDelayMax?: number;
+  retryJitter?: number;
   startAfter: Date;
   startedOn: Date;
   singletonKey: string | null;
@@ -425,6 +440,7 @@ export interface JobInsert<T = object> {
   retryDelay?: number;
   retryBackoff?: boolean;
   retryDelayMax?: number;
+  retryJitter?: number;
   startAfter?: number | string | Date;
   singletonKey?: string;
   singletonSeconds?: number;

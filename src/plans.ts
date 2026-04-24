@@ -39,6 +39,7 @@ const QUEUE_DEFAULTS = {
   retry_delay: 0,
   warning_queued: 0,
   retry_backoff: false,
+  retry_jitter: 1,
   partition: false
 }
 
@@ -114,6 +115,7 @@ function createTableQueue (schema: string) {
       retry_delay int NOT NULL,
       retry_backoff bool NOT NULL,
       retry_delay_max int,
+      retry_jitter numeric NOT NULL DEFAULT 1,
       expire_seconds int NOT NULL,
       retention_seconds int NOT NULL,
       deletion_seconds int NOT NULL,
@@ -304,6 +306,7 @@ function createTableJob (schema: string) {
       retry_delay integer not null default ${QUEUE_DEFAULTS.retry_delay},
       retry_backoff boolean not null default ${QUEUE_DEFAULTS.retry_backoff},
       retry_delay_max integer,
+      retry_jitter numeric not null default 1,
       expire_seconds int not null default ${QUEUE_DEFAULTS.expire_seconds},
       deletion_seconds int not null default ${QUEUE_DEFAULTS.deletion_seconds},
       singleton_key text,
@@ -334,6 +337,7 @@ const JOB_COLUMNS_ALL = `${JOB_COLUMNS_MIN},
   retry_delay as "retryDelay",
   retry_backoff as "retryBackoff",
   retry_delay_max as "retryDelayMax",
+  retry_jitter as "retryJitter",
   start_after as "startAfter",
   started_on as "startedOn",
   singleton_key as "singletonKey",
@@ -389,6 +393,7 @@ function createQueueFunction (schema: string) {
           retry_delay,
           retry_backoff,
           retry_delay_max,
+          retry_jitter,
           expire_seconds,
           retention_seconds,
           deletion_seconds,
@@ -405,6 +410,7 @@ function createQueueFunction (schema: string) {
           COALESCE((options->>'retryDelay')::int, ${QUEUE_DEFAULTS.retry_delay}),
           COALESCE((options->>'retryBackoff')::bool, ${QUEUE_DEFAULTS.retry_backoff}),
           (options->>'retryDelayMax')::int,
+          COALESCE((options->>'retryJitter')::numeric, ${QUEUE_DEFAULTS.retry_jitter}),
           COALESCE((options->>'expireInSeconds')::int, ${QUEUE_DEFAULTS.expire_seconds}),
           COALESCE((options->>'retentionSeconds')::int, ${QUEUE_DEFAULTS.retention_seconds}),
           COALESCE((options->>'deleteAfterSeconds')::int, ${QUEUE_DEFAULTS.deletion_seconds}),
@@ -587,6 +593,7 @@ function updateQueue (schema: string, { deadLetter }: UpdateQueueOptions = {}) {
       retry_delay_max = CASE WHEN o.data ? 'retryDelayMax'
         THEN (o.data->>'retryDelayMax')::int
         ELSE retry_delay_max END,
+      retry_jitter = COALESCE((o.data->>'retryJitter')::numeric, retry_jitter),
       expire_seconds = COALESCE((o.data->>'expireInSeconds')::int, expire_seconds),
       retention_seconds = COALESCE((o.data->>'retentionSeconds')::int, retention_seconds),
       deletion_seconds = COALESCE((o.data->>'deleteAfterSeconds')::int, deletion_seconds),
@@ -616,6 +623,7 @@ function getQueues (schema: string, names?: string[]): SqlQuery {
       q.retry_delay as "retryDelay",
       q.retry_backoff as "retryBackoff",
       q.retry_delay_max as "retryDelayMax",
+      q.retry_jitter as "retryJitter",
       q.expire_seconds as "expireInSeconds",
       q.retention_seconds as "retentionSeconds",
       q.deletion_seconds as "deleteAfterSeconds",
@@ -1079,6 +1087,7 @@ function insertJobs (schema: string, { table, name, returnId = true }: InsertJob
       retry_delay,
       retry_backoff,
       retry_delay_max,
+      retry_jitter,
       policy,
       dead_letter,
       heartbeat_seconds
@@ -1103,6 +1112,7 @@ function insertJobs (schema: string, { table, name, returnId = true }: InsertJob
       COALESCE("retryDelay", q.retry_delay) as retry_delay,
       COALESCE("retryBackoff", q.retry_backoff, false) as retry_backoff,
       COALESCE("retryDelayMax", q.retry_delay_max) as retry_delay_max,
+      COALESCE("retryJitter", q.retry_jitter) as retry_jitter,
       q.policy,
       COALESCE("deadLetter", q.dead_letter) as dead_letter,
       COALESCE("heartbeatSeconds", q.heartbeat_seconds) as heartbeat_seconds
@@ -1120,6 +1130,7 @@ function insertJobs (schema: string, { table, name, returnId = true }: InsertJob
         "retryLimit" integer,
         "retryDelay" integer,
         "retryDelayMax" integer,
+        "retryJitter" numeric,
         "retryBackoff" boolean,
         "singletonKey" text,
         "singletonSeconds" integer,
@@ -1202,6 +1213,7 @@ function failJobs (schema: string, table: string, where: string, output: string)
         retry_delay,
         retry_backoff,
         retry_delay_max,
+        retry_jitter,
         start_after,
         started_on,
         singleton_key,
@@ -1233,13 +1245,14 @@ function failJobs (schema: string, table: string, where: string, output: string)
         retry_delay,
         retry_backoff,
         retry_delay_max,
+        retry_jitter,
         CASE WHEN retry_count = retry_limit THEN start_after
              WHEN NOT retry_backoff THEN now() + retry_delay * interval '1'
              ELSE now() + LEAST(
                retry_delay_max,
                retry_delay * (
                 2 ^ LEAST(16, retry_count + 1) / 2 +
-                2 ^ LEAST(16, retry_count + 1) / 2 * random()
+                2 ^ LEAST(16, retry_count + 1) / 2 * retry_jitter * random()
                )
              ) * interval '1s'
         END as start_after,
@@ -1274,6 +1287,7 @@ function failJobs (schema: string, table: string, where: string, output: string)
         retry_delay,
         retry_backoff,
         retry_delay_max,
+        retry_jitter,
         start_after,
         started_on,
         singleton_key,
@@ -1302,6 +1316,7 @@ function failJobs (schema: string, table: string, where: string, output: string)
         retry_delay,
         retry_backoff,
         retry_delay_max,
+        retry_jitter,
         start_after,
         started_on,
         singleton_key,

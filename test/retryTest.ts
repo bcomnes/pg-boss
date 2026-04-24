@@ -102,6 +102,57 @@ describe('retries', function () {
     }
   })
 
+  it('should use retryJitter: 0 to produce a deterministic backoff delay', async function () {
+    ctx.boss = await helper.start(ctx.bossConfig)
+
+    const retryDelay = 10
+    const jobId = await ctx.boss.send(ctx.schema, null, {
+      retryLimit: 1,
+      retryDelay,
+      retryBackoff: true,
+      retryJitter: 0  // no random component: delay = retryDelay * 2^(retry_count+1) / 2 = 10s
+    })
+    assertTruthy(jobId)
+
+    await ctx.boss.fetch(ctx.schema)
+    await ctx.boss.fail(ctx.schema, jobId)
+
+    const job = await ctx.boss.getJobById(ctx.schema, jobId)
+    assertTruthy(job)
+
+    // With retryJitter: 0, delay = retryDelay * 2^1 / 2 = 10s exactly (no jitter)
+    const delayMs = job.startAfter.getTime() - Date.now()
+    expect(delayMs).toBeGreaterThan(8000)
+    expect(delayMs).toBeLessThan(11000)
+  })
+
+  it('should widen the jitter window with retryJitter > 1', async function () {
+    ctx.boss = await helper.start(ctx.bossConfig)
+
+    const retryDelay = 4
+    const retryJitter = 5
+
+    const jobId = await ctx.boss.send(ctx.schema, null, {
+      retryLimit: 1,
+      retryDelay,
+      retryBackoff: true,
+      retryJitter
+    })
+    assertTruthy(jobId)
+
+    await ctx.boss.fetch(ctx.schema)
+    await ctx.boss.fail(ctx.schema, jobId)
+
+    const job = await ctx.boss.getJobById(ctx.schema, jobId)
+    assertTruthy(job)
+
+    // base = retryDelay * 2^(retry_count+1) / 2 = 4 * 1 = 4s
+    // range = [base, base + base * retryJitter] = [4s, 4s + 4s*5] = [4s, 24s]
+    const delayMs = job.startAfter.getTime() - Date.now()
+    expect(delayMs).toBeGreaterThan(3000)   // floor: base minus 1s slack
+    expect(delayMs).toBeLessThan(25000)     // ceiling: base * (1 + retryJitter) plus 1s slack
+  })
+
   it('should mark a failed job to be retried', async function () {
     ctx.boss = await helper.start(ctx.bossConfig)
     const jobId = await ctx.boss.send(ctx.schema, null, { retryLimit: 0 })

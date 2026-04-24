@@ -37,11 +37,15 @@ Creates a new job and returns the job id.
 
 * **retryBackoff**, bool
 
-  Default: false. Enables exponential backoff retries based on retryDelay instead of a fixed delay. Sets initial retryDelay to 1 if not set. A simplified function to get the delay between runs is: `retryDelay * 2 ^ retryCount` with some jitter. The full function to determine the backoff delay is `Math.min(retryDelayMax, retryDelay * (2 ** Math.Min(16, retryCount) / 2 + 2 ** Math.Min(16, retryCount) / 2 * Math.random()))`
+  Default: false. Enables exponential backoff retries based on retryDelay instead of a fixed delay. Sets initial retryDelay to 1 if not set. A simplified function to get the delay between runs is: `retryDelay * 2 ^ retryCount` with some jitter. The full function to determine the backoff delay is `Math.min(retryDelayMax, retryDelay * (2 ** Math.Min(16, retryCount) / 2 + 2 ** Math.Min(16, retryCount) / 2 * Math.random()))` See also: retryJitter.
 
 * **retryDelayMax**, int
 
   Default: no limit. Maximum delay between retries of failed jobs, in seconds. Only used when retryBackoff is true.
+
+* **retryJitter**, number
+
+  Default: 1. Multiplier for the random component of exponential backoff. Only used when `retryBackoff` is `true`. Widens the jitter window without raising the minimum delay. The delay range for each retry is `[base, base × (1 + retryJitter)]` where `base = retryDelay × 2^retryCount`. The default of `1` preserves the existing equal-jitter behaviour. Increase this value to spread retries over a wider window — useful when many jobs fail simultaneously (e.g. due to an upstream rate limit).
 
 **Heartbeat options**
 
