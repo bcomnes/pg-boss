@@ -65,7 +65,7 @@
     "docs:readme": "node ./scripts/sync-readme.js"
   },
   "pgboss": {
-    "schema": 37
+    "schema": 38
   },
   "repository": {
     "type": "git",

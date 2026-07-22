@@ -11,6 +11,22 @@ const currentSchemaVersion = packageJson.pgboss.schema
 // Version 27 has async migrations that create BAM entries for partitioned tables
 const versionWithAsyncMigrations = 27
 
+async function waitForBamCompletion (boss: PgBoss, timeoutMs = 10000): Promise<void> {
+  const startTime = Date.now()
+  while (true) {
+    const bamStatus = await boss.getBamStatus()
+    const pending = bamStatus.find(s => s.status === 'pending' || s.status === 'in_progress')
+
+    if (!pending) return
+
+    if (Date.now() - startTime > timeoutMs) {
+      throw new Error(`Timeout waiting for BAM completion. Status: ${JSON.stringify(bamStatus)}`)
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500))
+  }
+}
+
 describe('migration', function () {
   let contractor: Contractor
 
@@ -113,6 +129,28 @@ describe('migration', function () {
     const plans = getMigrationPlans(schema, currentSchemaVersion - 1)
 
     expect(plans).toBeTruthy()
+  })
+
+  it('adds the ordered fetch indexes through BAM on partitioned upgrades', function () {
+    const schema = 'custom'
+    const sql = migrate(schema, 37)
+
+    expect(sql).toContain(`${schema}.job_table_run_async(`)
+    expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS job_i10 ON ${schema}.job (name, priority DESC, created_on, id) WHERE state < 'active' AND NOT blocked`)
+    expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS job_i11 ON ${schema}.job (name, created_on, id) WHERE state < 'active' AND NOT blocked`)
+
+    const rollback = getRollbackPlans(schema, 38)
+    expect(rollback).toContain(`DROP INDEX IF EXISTS ${schema}.job_i11`)
+    expect(rollback).toContain(`DROP INDEX IF EXISTS ${schema}.job_i10`)
+  })
+
+  it('adds the ordered fetch indexes directly on non-partitioned upgrades', function () {
+    const schema = 'custom'
+    const sql = migrate(schema, 37, getAll(schema, true))
+
+    expect(sql).not.toContain(`${schema}.job_table_run_async(`)
+    expect(sql).toContain(`CREATE INDEX job_i10 ON ${schema}.job (name, priority DESC, created_on, id) WHERE state < 'active' AND NOT blocked`)
+    expect(sql).toContain(`CREATE INDEX job_i11 ON ${schema}.job (name, created_on, id) WHERE state < 'active' AND NOT blocked`)
   })
 
   it('should fail to export commands to roll back from invalid version', function () {
@@ -429,6 +467,18 @@ describe('migration', function () {
 
     expect(migratedVersion).toBe(currentSchemaVersion)
 
+    // The ordered fetch indexes are built outside the migration transaction. Drain BAM before
+    // comparing the post-migration catalog with the fresh-install catalog.
+    const bamConfig = {
+      noDefault: true,
+      bamIntervalSeconds: 1,
+      __test__bypass_bam_interval_check: true
+    }
+    ctx.boss = new PgBoss({ ...config, ...bamConfig })
+    await ctx.boss.start()
+    await waitForBamCompletion(ctx.boss)
+    await ctx.boss.stop()
+
     // Capture final schema state
     const finalSchema = await getSchemaDefs([config.schema])
 
@@ -655,7 +705,8 @@ describe('migration', function () {
     // bam.created_on default change and NO index work. So it never re-drops/rebuilds its existing
     // job_i5/job_i9 — the slim job_i5 it already has stays put. The index fix lives in v33, which only
     // pre-v33 (deadlock-affected) databases run.
-    const sql = migrate('custom', 35)
+    const throughV36 = getAll('custom').filter(migration => migration.version <= 36)
+    const sql = migrate('custom', 35, throughV36)
     expect(sql).toContain('ALTER TABLE custom.bam ALTER COLUMN created_on SET DEFAULT clock_timestamp()')
     expect(sql).not.toContain('job_i9')
     expect(sql).not.toContain('job_i5')
@@ -822,6 +873,10 @@ describe('migration', function () {
 
       expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS job_common_i7 ON ${schema}.job_common`)
       expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS jABC_i7 ON ${schema}.jABC`)
+      expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS job_common_i10 ON ${schema}.job_common`)
+      expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS jABC_i10 ON ${schema}.jABC`)
+      expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS job_common_i11 ON ${schema}.job_common`)
+      expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS jABC_i11 ON ${schema}.jABC`)
       expect(sql).toContain(`CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS job_common_i8 ON ${schema}.job_common`)
       // i8 is not fanned out across partitions
       expect(sql).not.toContain('jABC_i8')

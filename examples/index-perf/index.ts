@@ -49,9 +49,9 @@ async function main () {
     const fetchIndex = await findFetchIndex(db)
     console.log(`\nfetch index on ${SCHEMA}.${TABLE}: ${fetchIndex.name}\n  ${fetchIndex.def}\n`)
 
-    // Before mangling indexes for the variant comparison, verify the migration-built job_i5 is
-    // actually reached by every dynamic shape the production fetchNextJob() can emit.
-    await verifyShapes(db, fetchIndex.name)
+    // Before mangling indexes for the variant comparison, verify a migration-built fetch index is
+    // reached by every dynamic shape the production fetchNextJob() can emit.
+    await verifyShapes(db, [fetchIndex.name, `${TABLE}_i10`, `${TABLE}_i11`])
 
     // Record the real, full fetchNextJob() plan once (UPDATE ... RETURNING, rolled back).
     console.log('='.repeat(90))
@@ -162,8 +162,8 @@ async function useOnlyIndex (db: Db, ddls: Array<(name: string) => string>) {
     [SCHEMA, TABLE]
   )
   for (const r of res.rows) {
-    // Drop anything that could serve the fetch (start_after- or priority-keyed), but never the PK.
-    if (/start_after|priority/.test(r.indexdef) && !/_pkey/.test(r.indexname)) {
+    // Drop anything that could serve the fetch (start_after- or ordered-keyed), but never the PK.
+    if (/start_after|priority|created_on/.test(r.indexdef) && !/_pkey/.test(r.indexname)) {
       await db.executeSql(`DROP INDEX ${SCHEMA}.${r.indexname}`)
     }
   }
@@ -198,13 +198,13 @@ function nextCteBlock (plan: string): string {
 }
 
 // Drive the REAL fetchNextJob() across the dynamic option combinations and confirm each still
-// reaches job_i5 via the index (not a Seq Scan). This guards against a dynamic WHERE/ORDER BY shape
-// silently regressing the hot path to a table scan. Runs against the migration-built index.
-async function verifyShapes (db: Db, fetchIndexName: string) {
+// reaches a migration-built fetch index (not a Seq Scan). This guards against a dynamic
+// WHERE/ORDER BY shape silently regressing the hot path to a table scan.
+async function verifyShapes (db: Db, fetchIndexNames: string[]) {
   console.log('\n' + '='.repeat(90))
-  console.log(`SHAPE MATRIX — does the real fetchNextJob() still reach ${fetchIndexName} for every dynamic condition?`)
+  console.log(`SHAPE MATRIX — does the real fetchNextJob() still reach ${fetchIndexNames.join('/')} for every dynamic condition?`)
   console.log('='.repeat(90))
-  console.log(['shape', 'next-CTE access', `uses ${fetchIndexName}?`, 'sort?'].join('\t'))
+  console.log(['shape', 'next-CTE access', 'uses fetch index?', 'sort?'].join('\t'))
   const base = {
     schema: SCHEMA,
     table: TABLE,
@@ -231,17 +231,17 @@ async function verifyShapes (db: Db, fetchIndexName: string) {
     const plan = await explain(db, s.label, q.text, q.values as unknown[], true)
     const block = nextCteBlock(plan)
     const seqOnFetch = new RegExp(`Seq Scan on ${SCHEMA}\\.${TABLE}\\b`).test(block)
-    const usesIdx = block.includes(fetchIndexName)
+    const usedIndex = fetchIndexNames.find(name => block.includes(name))
     const usesPkey = /_pkey/.test(block)
-    // The only real regression is a Seq Scan. Using job_i5 (Bitmap/Index) is the target; falling to
-    // the PK (name, id) is an acceptable index plan the planner picks when ORDER BY is id-only.
+    // The only real regression is a Seq Scan. Using a fetch index (Bitmap/Index) is the target;
+    // falling to the PK (name, id) is acceptable when ORDER BY is id-only.
     const access = seqOnFetch
       ? 'SEQ SCAN ⚠️'
-      : usesIdx
-        ? (/Bitmap/.test(block) ? 'Bitmap(job_i5)' : 'Index Scan(job_i5)')
+      : usedIndex
+        ? (/Bitmap/.test(block) ? `Bitmap(${usedIndex})` : `Index Scan(${usedIndex})`)
         : usesPkey ? 'Index Scan(pkey)' : 'other ⚠️'
     const sort = /\bSort\b/.test(block)
-    console.log([s.label, access, usesIdx ? 'yes' : (usesPkey ? 'pkey' : 'NO ⚠️'), sort ? 'SORT' : 'no-sort'].join('\t'))
+    console.log([s.label, access, usedIndex || (usesPkey ? 'pkey' : 'NO ⚠️'), sort ? 'SORT' : 'no-sort'].join('\t'))
   }
 }
 
