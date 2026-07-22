@@ -14,7 +14,7 @@ describe('drift', function () {
       const expected = plans.expectedManagedIndexes('pgboss', false, [])
       const names = expected.map(i => i.name)
 
-      for (let n = 1; n <= 9; n++) {
+      for (let n = 1; n <= 11; n++) {
         expect(names).toContain(`job_i${n}`)
       }
       expect(names).toContain('warning_i1')
@@ -27,7 +27,7 @@ describe('drift', function () {
     it('partitioned puts the full set on job_common', function () {
       const names = plans.expectedManagedIndexes('pgboss', true, []).map(i => i.name)
 
-      for (let n = 1; n <= 9; n++) {
+      for (let n = 1; n <= 11; n++) {
         expect(names).toContain(`job_common_i${n}`)
       }
       expect(names).not.toContain('job_i1')
@@ -41,6 +41,8 @@ describe('drift', function () {
       expect(names).toContain('jabc_i5')
       expect(names).toContain('jabc_i7')
       expect(names).toContain('jabc_i9')
+      expect(names).toContain('jabc_i10')
+      expect(names).toContain('jabc_i11')
       // short -> i1
       expect(names).toContain('jabc_i1')
       // other policy indexes absent
@@ -54,6 +56,8 @@ describe('drift', function () {
       const byName = new Map(plans.expectedManagedIndexes('pgboss', true, []).map(i => [i.name, i]))
       expect(byName.get('job_common_i5')!.keys).toBe('name, start_after')
       expect(byName.get('job_common_i9')!.keys).toBe('name, id')
+      expect(byName.get('job_common_i10')!.keys).toBe('name, priority DESC, created_on, id')
+      expect(byName.get('job_common_i11')!.keys).toBe('name, created_on, id')
       expect(byName.get('job_common_i1')!.keys).toBe("name, COALESCE(singleton_key, '')")
       // predicate is the catalog-canonical pg_get_indexdef form (per-conjunct parens)
       expect(byName.get('job_common_i9')!.predicate).toBe("blocking AND (state = 'completed')")

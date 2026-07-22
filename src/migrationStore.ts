@@ -18,7 +18,7 @@ interface MigrateOptions {
 function formatJobTable (command: string, table: string) {
   // Anchor both rewrites so a schema name that itself contains these substrings (e.g. `job_intake`)
   // isn't mangled: `.job\b` only matches the base table reference (`schema.job`, not `schema.job_i5`
-  // whose `job` is followed by `_`), and `job_iN` only matches the bare index-name tokens (job_i1..9),
+  // whose `job` is followed by `_`), and `job_iN` only matches bare index-name tokens (job_i1, job_i10),
   // never the `job_i` inside an arbitrary schema name.
   return command
     .replace(/\.job\b/g, `.${table}`)
@@ -731,6 +731,95 @@ const createQueueFn: Record<number, (schema: string) => string> = {
     END;
     $$
     LANGUAGE plpgsql;
+  `,
+
+  38: (schema) => `
+    CREATE OR REPLACE FUNCTION ${schema}.create_queue(queue_name text, options jsonb)
+    RETURNS VOID AS
+    $$
+    DECLARE
+      tablename varchar := CASE WHEN options->>'partition' = 'true'
+                            THEN 'j' || encode(sha224(queue_name::bytea), 'hex')
+                            ELSE 'job_common'
+                            END;
+      queue_created_on timestamptz;
+    BEGIN
+
+      WITH q as (
+        INSERT INTO ${schema}.queue (
+          name,
+          policy,
+          retry_limit,
+          retry_delay,
+          retry_backoff,
+          retry_delay_max,
+          expire_seconds,
+          retention_seconds,
+          deletion_seconds,
+          warning_queued,
+          dead_letter,
+          partition,
+          table_name,
+          heartbeat_seconds,
+          notify
+        )
+        VALUES (
+          queue_name,
+          options->>'policy',
+          COALESCE((options->>'retryLimit')::int, 2),
+          COALESCE((options->>'retryDelay')::int, 0),
+          COALESCE((options->>'retryBackoff')::bool, false),
+          (options->>'retryDelayMax')::int,
+          COALESCE((options->>'expireInSeconds')::int, 900),
+          COALESCE((options->>'retentionSeconds')::int, 1209600),
+          COALESCE((options->>'deleteAfterSeconds')::int, 604800),
+          COALESCE((options->>'warningQueueSize')::int, 0),
+          options->>'deadLetter',
+          COALESCE((options->>'partition')::bool, false),
+          tablename,
+          (options->>'heartbeatSeconds')::int,
+          COALESCE((options->>'notify')::bool, false)
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING created_on
+      )
+      SELECT created_on into queue_created_on from q;
+
+      IF queue_created_on IS NULL OR options->>'partition' IS DISTINCT FROM 'true' THEN
+        RETURN;
+      END IF;
+
+      EXECUTE format('CREATE TABLE ${schema}.%I (LIKE ${schema}.job INCLUDING DEFAULTS)', tablename);
+
+      EXECUTE ${schema}.job_table_format($cmd$ALTER TABLE ${schema}.job ADD PRIMARY KEY (name, id)$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$ALTER TABLE ${schema}.job ADD CONSTRAINT q_fkey FOREIGN KEY (name) REFERENCES ${schema}.queue (name) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$ALTER TABLE ${schema}.job ADD CONSTRAINT dlq_fkey FOREIGN KEY (dead_letter) REFERENCES ${schema}.queue (name) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED$cmd$, tablename);
+
+      EXECUTE ${schema}.job_table_format($cmd$CREATE INDEX job_i5 ON ${schema}.job (name, start_after) WHERE state < 'active' AND NOT blocked$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$CREATE INDEX job_i10 ON ${schema}.job (name, priority DESC, created_on, id) WHERE state < 'active' AND NOT blocked$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$CREATE INDEX job_i11 ON ${schema}.job (name, created_on, id) WHERE state < 'active' AND NOT blocked$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$CREATE UNIQUE INDEX job_i4 ON ${schema}.job (name, singleton_on, COALESCE(singleton_key, '')) WHERE state <> 'cancelled' AND singleton_on IS NOT NULL$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$CREATE INDEX job_i7 ON ${schema}.job (name, group_id) WHERE state = 'active' AND group_id IS NOT NULL$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$CREATE INDEX job_i9 ON ${schema}.job (name, id) WHERE blocking AND state = 'completed'$cmd$, tablename);
+
+      IF options->>'policy' = 'short' THEN
+        EXECUTE ${schema}.job_table_format($cmd$CREATE UNIQUE INDEX job_i1 ON ${schema}.job (name, COALESCE(singleton_key, '')) WHERE state = 'created' AND policy = 'short'$cmd$, tablename);
+      ELSIF options->>'policy' = 'singleton' THEN
+        EXECUTE ${schema}.job_table_format($cmd$CREATE UNIQUE INDEX job_i2 ON ${schema}.job (name, COALESCE(singleton_key, '')) WHERE state = 'active' AND policy = 'singleton'$cmd$, tablename);
+      ELSIF options->>'policy' = 'stately' THEN
+        EXECUTE ${schema}.job_table_format($cmd$CREATE UNIQUE INDEX job_i3 ON ${schema}.job (name, state, COALESCE(singleton_key, '')) WHERE state <= 'active' AND policy = 'stately'$cmd$, tablename);
+      ELSIF options->>'policy' = 'exclusive' THEN
+        EXECUTE ${schema}.job_table_format($cmd$CREATE UNIQUE INDEX job_i6 ON ${schema}.job (name, COALESCE(singleton_key, '')) WHERE state <= 'active' AND policy = 'exclusive'$cmd$, tablename);
+      ELSIF options->>'policy' = 'key_strict_fifo' THEN
+        EXECUTE ${schema}.job_table_format($cmd$CREATE UNIQUE INDEX job_i8 ON ${schema}.job (name, singleton_key) WHERE state IN ('active', 'retry', 'failed') AND policy = 'key_strict_fifo'$cmd$, tablename);
+        EXECUTE ${schema}.job_table_format($cmd$ALTER TABLE ${schema}.job ADD CONSTRAINT job_key_strict_fifo_singleton_key_check CHECK (NOT (policy = 'key_strict_fifo' AND singleton_key IS NULL))$cmd$, tablename);
+      END IF;
+
+      EXECUTE format('ALTER TABLE ${schema}.%I ADD CONSTRAINT cjc CHECK (name=%L)', tablename, queue_name);
+      EXECUTE format('ALTER TABLE ${schema}.job ATTACH PARTITION ${schema}.%I FOR VALUES IN (%L)', tablename, queue_name);
+    END;
+    $$
+    LANGUAGE plpgsql;
   `
 }
 
@@ -1269,6 +1358,52 @@ function getAll (schema: string, noPartitioning = false, noCovering = false): ty
       uninstall: noPartitioning
         ? []
         : [jobTableFormatFn[36](schema)]
+    },
+    {
+      release: '12.27.0',
+      version: 38,
+      previous: 37,
+      // Add indexes that match the two ordered fetch shapes. The partial predicate keeps completed,
+      // active, and blocked jobs out of both indexes; unlike a covering index, their key columns are
+      // useful before the row-locking heap visit because they satisfy ORDER BY and let LIMIT stop the
+      // scan early. job_i5 remains in place for queues with a large future-scheduled working set.
+      install: noPartitioning
+        ? [
+            `CREATE INDEX job_i10 ON ${schema}.job (name, priority DESC, created_on, id) WHERE state < 'active' AND NOT blocked`,
+            `CREATE INDEX job_i11 ON ${schema}.job (name, created_on, id) WHERE state < 'active' AND NOT blocked`
+          ]
+        : [createQueueFn[38](schema)],
+      // Partitioned PostgreSQL deployments fan the builds out through BAM so each potentially large
+      // job table is indexed CONCURRENTLY, outside the migration transaction. Backends configured
+      // without table partitioning use their native online CREATE INDEX behavior in install above.
+      async: noPartitioning
+        ? []
+        : [
+            `SELECT ${schema}.job_table_run_async(
+              'fetch_priority_index',
+              $VERSION$,
+              $$
+              CREATE INDEX CONCURRENTLY IF NOT EXISTS job_i10 ON ${schema}.job (name, priority DESC, created_on, id) WHERE state < 'active' AND NOT blocked
+              $$
+            )`,
+            `SELECT ${schema}.job_table_run_async(
+              'fetch_created_index',
+              $VERSION$,
+              $$
+              CREATE INDEX CONCURRENTLY IF NOT EXISTS job_i11 ON ${schema}.job (name, created_on, id) WHERE state < 'active' AND NOT blocked
+              $$
+            )`
+          ],
+      uninstall: noPartitioning
+        ? [
+            `DROP INDEX IF EXISTS ${schema}.job_i11`,
+            `DROP INDEX IF EXISTS ${schema}.job_i10`
+          ]
+        : [
+            createQueueFn[33](schema),
+            `SELECT ${schema}.job_table_run($cmd$DROP INDEX IF EXISTS ${schema}.job_i11$cmd$)`,
+            `SELECT ${schema}.job_table_run($cmd$DROP INDEX IF EXISTS ${schema}.job_i10$cmd$)`
+          ]
     }
   ]
 }

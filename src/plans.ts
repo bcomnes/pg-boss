@@ -277,7 +277,7 @@ export function createIndexJobDependencyParent (schema: string) {
 // Anchored so a schema name that itself contains these substrings (e.g. `job_intake`) isn't
 // mangled: `\.job\y` matches only the base table reference (`schema.job`, not `schema.job_i5` whose
 // `job` is followed by `_`, nor `.job_dependency`), and `\yjob_i(\d+)` matches only the bare
-// index-name tokens (job_i1..9), never the `job_i` inside a schema name. Mirrors formatJobTable()
+// index-name tokens (job_i1, job_i10), never the `job_i` inside a schema name. Mirrors formatJobTable()
 // in migrationStore.ts; the migration that fixed this (v37) carries its own frozen copy.
 export function jobTableFormatFunction (schema: string) {
   return `
@@ -458,6 +458,8 @@ function createTableJobCommon (schema: string) {
     SELECT ${schema}.job_table_run($cmd$${createCheckConstraintKeyStrictFifo(schema)}$cmd$, '${COMMON_JOB_TABLE}');
     SELECT ${schema}.job_table_run($cmd$${createIndexJobThrottle(schema)}$cmd$, '${COMMON_JOB_TABLE}');
     SELECT ${schema}.job_table_run($cmd$${createIndexJobFetch(schema)}$cmd$, '${COMMON_JOB_TABLE}');
+    SELECT ${schema}.job_table_run($cmd$${createIndexJobFetchPriority(schema)}$cmd$, '${COMMON_JOB_TABLE}');
+    SELECT ${schema}.job_table_run($cmd$${createIndexJobFetchCreated(schema)}$cmd$, '${COMMON_JOB_TABLE}');
     SELECT ${schema}.job_table_run($cmd$${createIndexJobGroupConcurrency(schema)}$cmd$, '${COMMON_JOB_TABLE}');
     SELECT ${schema}.job_table_run($cmd$${createIndexJobBlocking(schema)}$cmd$, '${COMMON_JOB_TABLE}');
 
@@ -478,6 +480,8 @@ function createTableJobIndexes (schema: string, noDeferrableConstraints = false,
     ${createCheckConstraintKeyStrictFifo(schema)};
     ${createIndexJobThrottle(schema)};
     ${createIndexJobFetch(schema, noCoveringIndex)};
+    ${createIndexJobFetchPriority(schema)};
+    ${createIndexJobFetchCreated(schema)};
     ${createIndexJobGroupConcurrency(schema)};
     ${createIndexJobBlocking(schema)};
   `
@@ -593,6 +597,8 @@ function createQueueFunction (schema: string, noPartitioning = false) {
       EXECUTE ${schema}.job_table_format($cmd$${createQueueForeignKeyJobDeadLetter(schema)}$cmd$, tablename);
 
       EXECUTE ${schema}.job_table_format($cmd$${createIndexJobFetch(schema)}$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$${createIndexJobFetchPriority(schema)}$cmd$, tablename);
+      EXECUTE ${schema}.job_table_format($cmd$${createIndexJobFetchCreated(schema)}$cmd$, tablename);
       EXECUTE ${schema}.job_table_format($cmd$${createIndexJobThrottle(schema)}$cmd$, tablename);
       EXECUTE ${schema}.job_table_format($cmd$${createIndexJobGroupConcurrency(schema)}$cmd$, tablename);
       EXECUTE ${schema}.job_table_format($cmd$${createIndexJobBlocking(schema)}$cmd$, tablename);
@@ -723,6 +729,17 @@ function createIndexJobFetch (schema: string, noCoveringIndex = false) {
   // dropping it shrinks job_i5 on the hot insert path at no read-side cost.
   // noCoveringIndex (the CockroachDB profile flag that stripped the old INCLUDE) is now moot here.
   return `CREATE INDEX job_i5 ON ${schema}.job (name, start_after) WHERE state < '${JOB_STATES.active}' AND NOT blocked`
+}
+
+// Ordered partial indexes let the fetch LIMIT stop as soon as it has enough candidates instead of
+// materializing and sorting every eligible row for the queue. Keep job_i5 as well: its start_after
+// key remains useful when a queue contains a large scheduled backlog that is not ready to run yet.
+function createIndexJobFetchPriority (schema: string) {
+  return `CREATE INDEX job_i10 ON ${schema}.job (name, priority DESC, created_on, id) WHERE state < '${JOB_STATES.active}' AND NOT blocked`
+}
+
+function createIndexJobFetchCreated (schema: string) {
+  return `CREATE INDEX job_i11 ON ${schema}.job (name, created_on, id) WHERE state < '${JOB_STATES.active}' AND NOT blocked`
 }
 
 function createIndexJobPolicyExclusive (schema: string) {
@@ -2854,8 +2871,8 @@ const POLICY_JOB_INDEXES: Record<number, string> = {
   8: QUEUE_POLICIES.key_strict_fifo
 }
 // job_iN indexes with no policy gate — created on every job table regardless of policy
-// (throttle i4, fetch i5, group-concurrency i7, blocking i9).
-const BASE_JOB_INDEXES = [4, 5, 7, 9]
+// (throttle i4, fetch i5/i10/i11, group-concurrency i7, blocking i9).
+const BASE_JOB_INDEXES = [4, 5, 7, 9, 10, 11]
 
 // The fixed (non-job) managed tables; job/job_common/partitions are handled separately.
 const FIXED_MANAGED_TABLES = ['version', 'queue', 'schedule', 'subscription', 'bam', 'warning', 'queue_stats', 'job_dependency']
